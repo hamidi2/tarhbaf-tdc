@@ -1,0 +1,4 @@
+samples/
+testdata/
+*.o
+test_core
