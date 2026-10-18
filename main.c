@@ -1,5 +1,7 @@
-/* main.c — «طرح‌باف» — تبدیل تصویر به فلاپی دستگاه بافندگی جاکوارد Karl Mayer (TDC)
- * Build: x86_64-w64-mingw32-gcc -O2 -municode -mwindows -static -o knitter.exe main.c tdc_format.c -lgdiplus -lcomdlg32 -lcomctl32 -lgdi32
+/* main.c — «طرح‌باف» v2 — تصویر → فایل فلاپی دستگاه بافندگی جاکوارد Karl Mayer (TDC)
+ * یک ورودی (تصویر)، یک خروجی (فایل IMG ۱٫۴۴مگابایتی). قالب مقاله داخل برنامه است.
+ * Build: x86_64-w64-mingw32-gcc -O2 -municode -mwindows -static -finput-charset=UTF-8
+ *        -o knitter.exe main.c tdc_format.c -lgdiplus -lcomdlg32 -lcomctl32 -lgdi32
  * See FORMAT.md for the reverse-engineered format. */
 #ifndef UNICODE
 #define UNICODE
@@ -16,10 +18,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include "tdc_format.h"
+#include "tdc_embedded.h"
 
 /* ---------------- controls ---------------- */
-#define IDC_BTN_TPL_FILE   101
-#define IDC_BTN_TPL_FLOPPY 102
 #define IDC_BTN_IMG        103
 #define IDC_SLIDER         104
 #define IDC_CHK_INVERT     105
@@ -28,24 +29,27 @@
 #define IDC_ED_NAME        108
 #define IDC_ED_DATE        109
 #define IDC_ED_ROWS        110
-#define IDC_BTN_SAVE       111
-#define IDC_BTN_WRITE      112
+#define IDC_BTN_MAKE       111
 #define IDC_PREVIEW        113
 #define IDC_ST_TPL         114
 #define IDC_ST_IMG         115
 #define IDC_ST_THRESH      116
+#define IDC_ED_WIDTH       117
+#define IDC_BTN_TPL_FILE   118
+#define IDC_ST_OUT         119
 
 #define FLOPPY_SIZE TDC_DISK_SIZE
 
 /* ---------------- app state ---------------- */
 static HINSTANCE g_hInst;
-static HWND g_hPreview, g_hStatus, g_hSlider;
+static HWND g_hPreview, g_hStatus, g_hSlider, g_hOut;
 static tdc_template g_tpl;
 static int g_hasTpl;
 
 /* source image (GDI+) */
 static GpBitmap *g_bmp;
 static int g_srcW, g_srcH;
+static WCHAR g_imgPath[MAX_PATH] = L"";
 
 /* design */
 static uint8_t *g_rows;        /* packed design-domain rows, top-first */
@@ -54,10 +58,7 @@ static int g_designW, g_designH;
 
 static uint8_t *g_disk1, *g_disk2;
 static int g_ndisks;
-static int g_updating;         /* guard: we set ED_ROWS ourselves */
-static WCHAR g_tplPath[MAX_PATH] = L"";
-static WCHAR g_imgPath[MAX_PATH] = L"";
-static WCHAR g_outBase[MAX_PATH] = L"";
+static int g_updating;
 
 /* ---------------- helpers ---------------- */
 static void SetStatus(const WCHAR *fmt, ...)
@@ -83,13 +84,38 @@ static void asciiify(const WCHAR *src, char *dst, int max)
     dst[n] = 0;
 }
 
-static INT_PTR get_btn(HWND h, int id) { return (INT_PTR)GetDlgItem(h, id); }
-
-static void enable_ui(HWND h, int hasTpl, int hasDesign)
+static void today_str(WCHAR *buf, int n)
 {
-    EnableWindow((HWND)get_btn(h, IDC_BTN_IMG), hasTpl);
-    EnableWindow((HWND)get_btn(h, IDC_BTN_SAVE), hasDesign);
-    EnableWindow((HWND)get_btn(h, IDC_BTN_WRITE), hasDesign);
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    _snwprintf(buf, n, L"%02u.%02u.%02u", st.wDay, st.wMonth, st.wYear % 100);
+}
+
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+static int ui_int(HWND h, int id, int def)
+{
+    WCHAR tmp[16];
+    int v;
+    GetWindowTextW(GetDlgItem(h, id), tmp, 16);
+    v = _wtoi(tmp);
+    return v ? v : def;
+}
+
+/* embedded template (the reference machine's article) */
+static void init_embedded_template(void)
+{
+    memset(&g_tpl, 0, sizeof g_tpl);
+    memcpy(g_tpl.param, emb_param88, 88);
+    memcpy(g_tpl.laenge, emb_laenge, EMB_LAENGE_LEN);
+    g_tpl.laenge_len = EMB_LAENGE_LEN;
+    memcpy(g_tpl.trailer, emb_trailer, EMB_TRAILER_LEN);
+    g_tpl.trailer_len = EMB_TRAILER_LEN;
+    g_tpl.width_bits = EMB_WIDTH_BITS;
+    g_tpl.width_px   = EMB_WIDTH_PX;
+    strcpy(g_tpl.name, "DESIGN");
+    strcpy(g_tpl.date, "01.01.00");
+    g_hasTpl = 1;
 }
 
 /* ---------------- image → design ---------------- */
@@ -103,45 +129,38 @@ static void free_design(void)
     g_ndisks = 0;
 }
 
-static void today_str(WCHAR *buf, int n)
-{
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    _snwprintf(buf, n, L"%02u.%02u.%02u", st.wDay, st.wMonth, st.wYear % 100);
-}
-
-static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
-
 /* Rebuild the 1-bit design from the current image + settings. */
 static void rebuild_design(HWND h)
 {
-    HWND hInv = GetDlgItem(h, IDC_CHK_INVERT);
-    int invert = SendMessageW(hInv, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    int soft = SendMessageW((HWND)get_btn(h, IDC_RAD_SOFT), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    int invert = SendMessageW(GetDlgItem(h, IDC_CHK_INVERT), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    int soft = SendMessageW(GetDlgItem(h, IDC_RAD_SOFT), BM_GETCHECK, 0, 0) == BST_CHECKED;
     int thresh = (int)SendMessageW(g_hSlider, TBM_GETPOS, 0, 0);
+    int Wpx, Wbits, H, x, y;
     WCHAR tmp[16];
-    int W, H, x, y, target_rows;
     uint8_t *lum = NULL;
 
     if (!g_hasTpl || !g_bmp) return;
 
-    W = g_tpl.width_bits;
-    GetWindowTextW(GetDlgItem(h, IDC_ED_ROWS), tmp, 16);
-    target_rows = _wtoi(tmp);
-    if (target_rows < 1) target_rows = 1;
-    H = clampi(target_rows, 1, tdc_rows_capacity(&g_tpl) * 2);
-    if (H != target_rows) {
-        _snwprintf(tmp, 16, L"%d", H);
-        g_updating = 1;
-        SetWindowTextW(GetDlgItem(h, IDC_ED_ROWS), tmp);
-        g_updating = 0;
-    }
+    Wpx = clampi(ui_int(h, IDC_ED_WIDTH, EMB_WIDTH_PX), 8, 4096);
+    Wbits = (Wpx + 7) / 8 * 8;
+    g_updating = 1;
+    _snwprintf(tmp, 16, L"%d", Wpx);
+    SetWindowTextW(GetDlgItem(h, IDC_ED_WIDTH), tmp);
+    g_updating = 0;
+    H = clampi(ui_int(h, IDC_ED_ROWS, 1), 1, 60000);
+    g_updating = 1;
+    _snwprintf(tmp, 16, L"%d", H);
+    SetWindowTextW(GetDlgItem(h, IDC_ED_ROWS), tmp);
+    g_updating = 0;
+
+    g_tpl.width_px = Wpx;
+    g_tpl.width_bits = Wbits;
 
     free_design();
-    g_designW = W; g_designH = H;
-    g_rows = malloc((size_t)H * (W / 8));
-    g_gray = malloc((size_t)W * H);
-    lum = malloc((size_t)W * H);
+    g_designW = Wbits; g_designH = H;
+    g_rows = malloc((size_t)H * (Wbits / 8));
+    g_gray = malloc((size_t)Wbits * H);
+    lum = malloc((size_t)Wbits * H);
     if (!g_rows || !g_gray || !lum) {
         free(lum);
         free_design();
@@ -157,22 +176,20 @@ static void rebuild_design(HWND h)
         const uint8_t *px;
         if (GdipBitmapLockBits(g_bmp, &rect, ImageLockModeRead,
                                PixelFormat32bppARGB, &bd) != Ok) {
-            free(lum);
+            free(lum); free_design();
             SetStatus(L"خطا در خواندن پیکسل‌های تصویر");
             return;
         }
         stride = (UINT)labs(bd.Stride);
         px = (const uint8_t *)bd.Scan0;
-
-        /* box-average (soft) or nearest (sharp) downscale to W×H luminance */
         for (y = 0; y < H; y++) {
             int sy0 = (int)((int64_t)y * g_srcH / H);
             int sy1 = (int)((int64_t)(y + 1) * g_srcH / H);
             if (sy1 <= sy0) sy1 = sy0 + 1;
             if (soft) {
-                for (x = 0; x < W; x++) {
-                    int sx0 = (int)((int64_t)x * g_srcW / W);
-                    int sx1 = (int)((int64_t)(x + 1) * g_srcW / W);
+                for (x = 0; x < Wbits; x++) {
+                    int sx0 = (int)((int64_t)x * g_srcW / Wbits);
+                    int sx1 = (int)((int64_t)(x + 1) * g_srcW / Wbits);
                     int sx, sy;
                     uint32_t sum = 0, cnt = 0;
                     if (sx1 <= sx0) sx1 = sx0 + 1;
@@ -180,20 +197,19 @@ static void rebuild_design(HWND h)
                         const uint8_t *row = px + (size_t)sy * stride;
                         for (sx = sx0; sx < sx1; sx++) {
                             const uint8_t *p = row + (size_t)sx * 4;
-                            /* 0.30R+0.59G+0.11B — ignore alpha (opaque) */
                             sum += (p[2] * 77 + p[1] * 151 + p[0] * 28) >> 8;
                             cnt++;
                         }
                     }
-                    lum[(size_t)y * W + x] = (uint8_t)(sum / (cnt ? cnt : 1));
+                    lum[(size_t)y * Wbits + x] = (uint8_t)(sum / (cnt ? cnt : 1));
                 }
             } else {
                 int sy = (sy0 + sy1) / 2;
                 const uint8_t *row = px + (size_t)sy * stride;
-                for (x = 0; x < W; x++) {
-                    int sx = (int)(((int64_t)x * 2 + 1) * g_srcW / (2 * W));
+                for (x = 0; x < Wbits; x++) {
+                    int sx = (int)(((int64_t)x * 2 + 1) * g_srcW / (2 * Wbits));
                     const uint8_t *p = row + (size_t)sx * 4;
-                    lum[(size_t)y * W + x] =
+                    lum[(size_t)y * Wbits + x] =
                         (uint8_t)((p[2] * 77 + p[1] * 151 + p[0] * 28) >> 8);
                 }
             }
@@ -203,61 +219,45 @@ static void rebuild_design(HWND h)
 
     /* threshold → gray (preview) + packed rows (design domain; 1 = light) */
     {
-        int dbytes = W / 8;
-        int valid_last = ((g_tpl.width_px - 1) % 8) + 1;
-        memset(g_rows, 0xFF, (size_t)H * dbytes);   /* pad bits = 1 (white) */
+        int dbytes = Wbits / 8;
+        int bx = Wpx >> 3, sh = 0x80 >> (Wpx & 7);
+        memset(g_rows, 0xFF, (size_t)H * dbytes);   /* pad/margin bits = white */
         for (y = 0; y < H; y++) {
             uint8_t *row = g_rows + (size_t)y * dbytes;
-            for (x = 0; x < W; x++) {
-                int dark = lum[(size_t)y * W + x] < thresh;
+            for (x = 0; x < Wbits; x++) {
+                int dark = lum[(size_t)y * Wbits + x] < thresh;
                 if (invert) dark = !dark;
-                g_gray[(size_t)y * W + x] = dark ? 0 : 255;
+                g_gray[(size_t)y * Wbits + x] = dark ? 0 : 255;
                 if (!dark)
                     row[x >> 3] &= (uint8_t)~(0x80 >> (x & 7));
             }
         }
-        /* real design columns end at width_px: force margin bits to white */
-        if (g_tpl.width_px < W) {
-            int bx = g_tpl.width_px >> 3, sh = 0x80 >> (g_tpl.width_px & 7);
+        if (Wpx < Wbits)   /* force margin columns white */
             for (y = 0; y < H; y++) {
                 uint8_t *row = g_rows + (size_t)y * dbytes;
                 row[bx] |= sh;
                 memset(row + bx + 1, 0xFF, (size_t)dbytes - bx - 1);
             }
-        }
-        (void)valid_last;
     }
     free(lum);
     InvalidateRect(g_hPreview, NULL, FALSE);
-    enable_ui(h, 1, 1);
+    EnableWindow(GetDlgItem(h, IDC_BTN_MAKE), TRUE);
     {
-        int nd = tdc_disk_count(&g_tpl, H);
-        SetStatus(L"طرح: %d×%d — حدود %s دیسک (ظرفیت هر دیسک: %d ردیف)",
-                  W, H, nd == 1 ? L"یک" : L"دو", tdc_rows_capacity(&g_tpl));
+        int pitch = ((Wbits / 8 + 1) / 2 * 2 + 2);
+        int cap = ((TDC_DATA_BLOCK_LAST - TDC_DATA_BLOCK_FIRST) * TDC_BLOCK - 4096) / pitch;
+        SetStatus(L"طرح: %d×%d — %s (ظرفیت هر دیسک حدود %d ردیف)",
+                  Wpx, H, H <= cap ? L"یک دیسک" : L"دو دیسک", cap);
     }
 }
 
-/* ---------------- template loading ---------------- */
-static void after_template(HWND h)
-{
-    WCHAR info[512];
-    int cap = tdc_rows_capacity(&g_tpl);
-    WCHAR aname[TDC_NAME_MAX];
-    MultiByteToWideChar(CP_ACP, 0, g_tpl.name, -1, aname, TDC_NAME_MAX);
-    _snwprintf(info, 512,
-        L"قالب: %s\nمقالهٔ قالب: %s   عرض ماشین: %d پیکسل   ظرفیت: %d ردیف در هر دیسک",
-        g_tplPath, aname, g_tpl.width_px, cap);
-    SetWindowTextW(GetDlgItem(h, IDC_ST_TPL), info);
-    enable_ui(h, 1, g_rows != NULL);
-    rebuild_design(h);
-}
-
+/* ---------------- template from file (other articles) ---------------- */
 static void load_template_file(HWND h)
 {
     OPENFILENAMEW ofn;
     WCHAR file[MAX_PATH] = L"";
     static uint8_t disk[FLOPPY_SIZE];
     FILE *f;
+    tdc_template t2;
     memset(&ofn, 0, sizeof ofn);
     ofn.lStructSize = sizeof ofn;
     ofn.hwndOwner = h;
@@ -269,67 +269,28 @@ static void load_template_file(HWND h)
     f = _wfopen(file, L"rb");
     if (!f || fread(disk, 1, FLOPPY_SIZE, f) != FLOPPY_SIZE) {
         if (f) fclose(f);
-        MessageBoxW(h, L"خواندن فایل ۱٫۴۴ مگابایتی ناموفق بود.", L"خطا", MB_ICONERROR | MB_RTLREADING);
+        MessageBoxW(h, L"خواندن فایل ۱٫۴۴ مگابایتی ناموفق بود.", L"خطا",
+                    MB_ICONERROR | MB_RTLREADING);
         return;
     }
     fclose(f);
-    if (tdc_parse_template(disk, &g_tpl)) {
+    if (tdc_parse_template(disk, &t2)) {
         MessageBoxW(h, L"این فایل شبیه فلاپی TDC نیست (دایرکتوری MUSTER/LAENGE پیدا نشد).",
                     L"خطا", MB_ICONERROR | MB_RTLREADING);
         return;
     }
+    g_tpl = t2;
     g_hasTpl = 1;
-    wcscpy(g_tplPath, file);
-    after_template(h);
-}
-
-static int floppy_read(uint8_t *buf)
-{
-    HANDLE d = CreateFileW(L"\\\\.\\A:", GENERIC_READ, FILE_SHARE_READ, NULL,
-                           OPEN_EXISTING, 0, NULL);
-    DWORD got;
-    if (d == INVALID_HANDLE_VALUE) return GetLastError();
-    if (!ReadFile(d, buf, FLOPPY_SIZE, &got, NULL) || got != FLOPPY_SIZE) {
-        CloseHandle(d);
-        return GetLastError() ? GetLastError() : -1;
+    {
+        const WCHAR *fn = wcsrchr(file, L'\\');
+        WCHAR info[512], aname[TDC_NAME_MAX];
+        fn = fn ? fn + 1 : file;
+        MultiByteToWideChar(CP_ACP, 0, g_tpl.name, -1, aname, TDC_NAME_MAX);
+        _snwprintf(info, 512, L"قالب: %s — مقالهٔ %s (عرض قالب: %d پیکسل)",
+                   fn, aname, g_tpl.width_px);
+        SetWindowTextW(GetDlgItem(h, IDC_ST_TPL), info);
     }
-    CloseHandle(d);
-    return 0;
-}
-
-static int floppy_write(const uint8_t *buf)
-{
-    HANDLE d = CreateFileW(L"\\\\.\\A:", GENERIC_WRITE, FILE_SHARE_READ, NULL,
-                           OPEN_EXISTING, 0, NULL);
-    DWORD put;
-    if (d == INVALID_HANDLE_VALUE) return GetLastError();
-    if (!WriteFile(d, buf, FLOPPY_SIZE, &put, NULL) || put != FLOPPY_SIZE) {
-        CloseHandle(d);
-        return GetLastError() ? GetLastError() : -1;
-    }
-    FlushFileBuffers(d);
-    CloseHandle(d);
-    return 0;
-}
-
-static void load_template_floppy(HWND h)
-{
-    static uint8_t disk[FLOPPY_SIZE];
-    int rc = floppy_read(disk);
-    if (rc) {
-        MessageBoxW(h, L"خواندن فلاپی از درایو A: ناموفق بود.\n"
-                       L"فلاپی ۱٫۴۴ را داخل درایو بگذارید یا فایل قالب را انتخاب کنید.",
-                    L"خطا", MB_ICONERROR | MB_RTLREADING);
-        return;
-    }
-    if (tdc_parse_template(disk, &g_tpl)) {
-        MessageBoxW(h, L"این فلاپی شبیه فلاپی TDC نیست.", L"خطا",
-                    MB_ICONERROR | MB_RTLREADING);
-        return;
-    }
-    g_hasTpl = 1;
-    wcscpy(g_tplPath, L"A:\\");
-    after_template(h);
+    if (g_bmp) rebuild_design(h);
 }
 
 /* ---------------- image loading ---------------- */
@@ -356,16 +317,13 @@ static void load_image(HWND h)
     GdipGetImageHeight((GpImage *)bmp, (UINT *)&g_srcH);
     wcscpy(g_imgPath, file);
     {
-        WCHAR info[512], base[MAX_PATH], *dot;
-        WCHAR rows[16];
+        WCHAR info[512], base[MAX_PATH], rows[16];
         const WCHAR *fn = wcsrchr(file, L'\\');
         fn = fn ? fn + 1 : file;
         wcscpy(base, fn);
-        dot = wcschr(base, L'.');
-        if (dot) *dot = 0;
+        { WCHAR *dot = wcschr(base, L'.'); if (dot) *dot = 0; }
         _snwprintf(info, 512, L"تصویر: %s  (%d×%d)", fn, g_srcW, g_srcH);
         SetWindowTextW(GetDlgItem(h, IDC_ST_IMG), info);
-        /* default name & rows */
         {
             char an[TDC_NAME_MAX];
             asciiify(base, an, TDC_NAME_MAX);
@@ -375,27 +333,27 @@ static void load_image(HWND h)
         SetWindowTextW(GetDlgItem(h, IDC_ED_NAME), base);
         today_str(rows, 16);
         SetWindowTextW(GetDlgItem(h, IDC_ED_DATE), rows);
-        _snwprintf(rows, 16, L"%d",
-                   g_srcH ? (int)((int64_t)g_srcH * g_tpl.width_bits / g_srcW) : 512);
-        SetWindowTextW(GetDlgItem(h, IDC_ED_ROWS), rows);
+        /* rows default from the design width (پیکسل) */
+        {
+            int wpx = ui_int(h, IDC_ED_WIDTH, EMB_WIDTH_PX);
+            _snwprintf(rows, 16, L"%d",
+                       g_srcH ? (int)((int64_t)g_srcH * wpx / g_srcW) : 512);
+            g_updating = 1;
+            SetWindowTextW(GetDlgItem(h, IDC_ED_ROWS), rows);
+            g_updating = 0;
+        }
+        SetWindowTextW(GetDlgItem(h, IDC_ST_OUT), L"");
     }
     rebuild_design(h);
 }
 
-/* ---------------- disk building ---------------- */
-static void default_out_base(HWND h, WCHAR *base, int n)
-{
-    WCHAR name[64];
-    GetWindowTextW(GetDlgItem(h, IDC_ED_NAME), name, 64);
-    if (g_outBase[0]) wcscpy(base, g_outBase);
-    else _snwprintf(base, n, L"C:\\%s.img", name[0] ? name : L"DESIGN");
-}
-
+/* ---------------- disk building & output ---------------- */
 static int build_disks(HWND h)
 {
     int rows = g_designH;
     int dbytes = g_designW / 8;
-    int cap = tdc_rows_capacity(&g_tpl);
+    int pitch = (dbytes + 1) / 2 * 2 + 2;
+    int cap = ((TDC_DATA_BLOCK_LAST - TDC_DATA_BLOCK_FIRST) * TDC_BLOCK - 4096) / pitch;
     int rc;
     const uint8_t *d2rows;
     char aname[TDC_NAME_MAX], adate[16];
@@ -419,95 +377,75 @@ static int build_disks(HWND h)
         strcpy(g_tpl.date, adate);
     }
 
-    g_ndisks = tdc_disk_count(&g_tpl, rows);
+    g_ndisks = rows <= cap ? 1 : 2;
     if (g_ndisks == 1) {
         rc = tdc_build_disk(&g_tpl, g_rows, rows, 1, 1, rows, 0, 0, g_disk1);
         g_disk2[0] = 0;
     } else {
         rc = tdc_build_disk(&g_tpl, g_rows + (size_t)(rows - cap) * dbytes, cap,
-                            2, 1, cap,
-                            cap + 1, rows - cap, g_disk1);
+                            2, 1, cap, cap + 1, rows - cap, g_disk1);
         if (rc) return rc;
-        d2rows = g_rows;                        /* top part */
+        d2rows = g_rows;
         rc = tdc_build_disk(&g_tpl, d2rows, rows - cap, 2, 2, cap,
                             cap + 1, rows - cap, g_disk2);
     }
     return rc;
 }
 
-static void save_disks(HWND h)
+static int write_file(const WCHAR *path, const uint8_t *buf)
 {
-    OPENFILENAMEW ofn;
-    WCHAR base[MAX_PATH];
-    FILE *f;
-    default_out_base(h, base, MAX_PATH);
-    memset(&ofn, 0, sizeof ofn);
-    ofn.lStructSize = sizeof ofn;
-    ofn.hwndOwner = h;
-    ofn.lpstrFilter = L"فایل فلاپی (*.img)\0*.img\0";
-    ofn.lpstrFile = base;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrDefExt = L"img";
-    ofn.Flags = OFN_OVERWRITEPROMPT;
-    if (!GetSaveFileNameW(&ofn)) return;
-    wcscpy(g_outBase, base);
+    FILE *f = _wfopen(path, L"wb");
+    if (!f) return -1;
+    if (fwrite(buf, 1, FLOPPY_SIZE, f) != FLOPPY_SIZE) { fclose(f); return -1; }
+    fclose(f);
+    return 0;
+}
 
+static void make_output(HWND h)
+{
+    WCHAR out[MAX_PATH];
+    if (!g_imgPath[0]) {
+        MessageBoxW(h, L"اول تصویر را باز کنید.", L"طرح‌باف",
+                    MB_ICONINFORMATION | MB_RTLREADING);
+        return;
+    }
+    wcscpy(out, g_imgPath);
+    { WCHAR *dot = wcsrchr(out, L'.'); if (dot) *dot = 0; }
+    wcscat(out, L".img");
+
+    if (GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES) {
+        if (MessageBoxW(h, L"فایل خروجی از قبل وجود دارد؛ جایگزین شود؟", L"طرح‌باف",
+                        MB_YESNO | MB_ICONQUESTION | MB_RTLREADING) != IDYES)
+            return;
+    }
+    rebuild_design(h);
     if (build_disks(h)) {
         MessageBoxW(h, L"ساخت فایل فلاپی ناموفق بود (حافظه یا اندازهٔ طرح).",
                     L"خطا", MB_ICONERROR | MB_RTLREADING);
         return;
     }
-    f = _wfopen(base, L"wb");
-    if (!f || fwrite(g_disk1, 1, FLOPPY_SIZE, f) != FLOPPY_SIZE || fclose(f)) {
+    if (write_file(out, g_disk1)) {
         MessageBoxW(h, L"نوشتن فایل ناموفق بود.", L"خطا", MB_ICONERROR | MB_RTLREADING);
         return;
     }
     if (g_ndisks == 2) {
-        WCHAR p2[MAX_PATH];
-        WCHAR stem[MAX_PATH];
-        wcscpy(stem, base);
+        WCHAR p2[MAX_PATH], stem[MAX_PATH];
+        wcscpy(stem, out);
         { WCHAR *dot = wcsrchr(stem, L'.'); if (dot) *dot = 0; }
         _snwprintf(p2, MAX_PATH, L"%s-disk2.img", stem);
-        f = _wfopen(p2, L"wb");
-        if (!f || fwrite(g_disk2, 1, FLOPPY_SIZE, f) != FLOPPY_SIZE || fclose(f)) {
+        if (write_file(p2, g_disk2)) {
             MessageBoxW(h, L"نوشتن دیسک ۲ ناموفق بود.", L"خطا", MB_ICONERROR | MB_RTLREADING);
             return;
         }
-        SetStatus(L"ذخیره شد: %s و %s", base, p2);
+        SetWindowTextW(GetDlgItem(h, IDC_ST_OUT), out);
+        SetStatus(L"دو دیسک ساخته شد: %s و %s", out, p2);
+        MessageBoxW(h, L"طرح دو-دیسکی است؛ دو فایل ساخته شد.", L"انجام شد",
+                    MB_ICONINFORMATION | MB_RTLREADING);
     } else {
-        SetStatus(L"ذخیره شد: %s", base);
-    }
-    MessageBoxW(h, L"فایل فلاپی ساخته شد.\nبا WinImage یا نرم‌افزار مشابه روی فلاپی بنویسید\nیا دکمهٔ «نوشتن روی فلاپی» را بزنید.",
-                L"انجام شد", MB_ICONINFORMATION | MB_RTLREADING);
-}
-
-static void write_floppy(HWND h)
-{
-    int rc;
-    if (build_disks(h)) {
-        MessageBoxW(h, L"ساخت دیسک ناموفق بود.", L"خطا", MB_ICONERROR | MB_RTLREADING);
-        return;
-    }
-    rc = floppy_write(g_disk1);
-    if (rc) {
-        MessageBoxW(h, L"نوشتن روی فلاپی A: ناموفق بود.\n"
-                       L"فلاپی ۱٫۴۴ داخل درایو بگذارید و قفل نوشتنش را بردارید،\n"
-                       L"یا فایل IMG را با WinImage بنویسید.",
-                    L"خطا", MB_ICONERROR | MB_RTLREADING);
-        return;
-    }
-    if (g_ndisks == 2) {
-        if (MessageBoxW(h, L"طرح دو-دیسکی است.\nدیسک ۱ (ردیف‌های پایینی) نوشته شد.\nدیسک ۲ را در درایو بگذارید و OK بزنید.",
-                        L"دیسک ۲", MB_OKCANCEL | MB_ICONINFORMATION | MB_RTLREADING) != IDOK)
-            return;
-        rc = floppy_write(g_disk2);
-        if (rc) {
-            MessageBoxW(h, L"نوشتن دیسک ۲ ناموفق بود.", L"خطا", MB_ICONERROR | MB_RTLREADING);
-            return;
-        }
-        SetStatus(L"هر دو دیسک روی فلاپی نوشته شد.");
-    } else {
-        SetStatus(L"دیسک روی فلاپی نوشته شد.");
+        SetWindowTextW(GetDlgItem(h, IDC_ST_OUT), out);
+        SetStatus(L"فایل فلاپی ساخته شد: %s", out);
+        MessageBoxW(h, L"فایل فلاپی ساخته شد.", L"انجام شد",
+                    MB_ICONINFORMATION | MB_RTLREADING);
     }
 }
 
@@ -521,7 +459,6 @@ static LRESULT CALLBACK preview_proc(HWND w, UINT m, WPARAM wp, LPARAM lp)
         GetClientRect(w, &rc);
         FillRect(dc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
         if (g_gray && g_designW) {
-            /* 8bpp top-down DIB from gray */
             struct { BITMAPINFOHEADER hdr; RGBQUAD pal[256]; } bi;
             void *bits;
             HBITMAP hbmp, hold;
@@ -548,7 +485,6 @@ static LRESULT CALLBACK preview_proc(HWND w, UINT m, WPARAM wp, LPARAM lp)
                 }
                 mdc = CreateCompatibleDC(dc);
                 hold = SelectObject(mdc, hbmp);
-                SetStretchBltMode(dc, COLORONCOLOR);
                 {
                     int pw = rc.right - rc.left - 8, ph = rc.bottom - rc.top - 8;
                     double s = (double)pw / g_designW < (double)ph / g_designH
@@ -585,10 +521,10 @@ static void create_controls(HWND h)
     hfa = CreateFontIndirectW(&lf);
 
     #define LB(c, txt, x, wdt) { HWND t = CreateWindowW(L"STATIC", txt, \
-        WS_CHILD|WS_VISIBLE, x, y, wdt, 22, h, (HMENU)(INT_PTR)(c), g_hInst, NULL); \
+        WS_CHILD|WS_VISIBLE, x, y+4, wdt, 22, h, (HMENU)(INT_PTR)(c), g_hInst, NULL); \
         SendMessageW(t, WM_SETFONT, (WPARAM)hfa, 0); }
-    #define BT(c, txt, x, wdt) { HWND t = CreateWindowW(L"BUTTON", txt, \
-        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, x, y, wdt, 30, h, (HMENU)(INT_PTR)(c), g_hInst, NULL); \
+    #define BT(c, txt, x, wdt, hgt) { HWND t = CreateWindowW(L"BUTTON", txt, \
+        WS_CHILD|WS_VISIBLE|BS_PUSHBUTTON, x, y, wdt, hgt, h, (HMENU)(INT_PTR)(c), g_hInst, NULL); \
         SendMessageW(t, WM_SETFONT, (WPARAM)hfa, 0); }
     #define CK(c, txt, x, wdt) { HWND t = CreateWindowW(L"BUTTON", txt, \
         WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, x, y, wdt, 24, h, (HMENU)(INT_PTR)(c), g_hInst, NULL); \
@@ -600,23 +536,28 @@ static void create_controls(HWND h)
         WS_CHILD|WS_VISIBLE|WS_BORDER|ES_LEFT, x, y, wdt, 26, h, (HMENU)(INT_PTR)(c), g_hInst, NULL); \
         SendMessageW(t, WM_SETFONT, (WPARAM)hfa, 0); }
 
-    /* RTL window mirrors x: larger x = further left visually */
-    BT(IDC_BTN_TPL_FILE,  L"فلاپی مرجع از فایل…", 10, 195);
-    BT(IDC_BTN_TPL_FLOPPY,L"خواندن قالب از فلاپی A:", 215, 215);
-    y += 36;
-    LB(IDC_ST_TPL, L"اول فلاپی مرجع (یک فلاپی کارکردهٔ همان مقاله) را باز کنید.", 10, 620);
-    y += 34;
-    BT(IDC_BTN_IMG, L"بازکردن تصویر…", 10, 160);
-    y += 36;
-    LB(IDC_ST_IMG, L"", 10, 620);
-    y += 26;
-    LB(0, L"آستانهٔ سیاه/سفید:", 10, 145);
+    BT(IDC_BTN_IMG, L"بازکردن تصویر…", 10, 180, 32);
+    y += 38;
+    LB(IDC_ST_IMG, L"تصویری باز نشده.", 10, 620);
+    y += 30;
+    LB(0, L"نام طرح:", 10, 90);           ED(IDC_ED_NAME, 105, 150);
+    LB(0, L"تاریخ:", 270, 65);            ED(IDC_ED_DATE, 340, 85);
+    y += 32;
+    LB(0, L"عرض طرح (پیکسل):", 10, 150);  ED(IDC_ED_WIDTH, 165, 80);
+    LB(0, L"تعداد ردیف:", 270, 105);      ED(IDC_ED_ROWS, 380, 80);
+    {
+        WCHAR t[16];
+        _snwprintf(t, 16, L"%d", EMB_WIDTH_PX);
+        SetWindowTextW(GetDlgItem(h, IDC_ED_WIDTH), t);
+    }
+    y += 32;
+    LB(0, L"آستانهٔ سیاه/سفید:", 10, 150);
     g_hSlider = CreateWindowW(L"msctls_trackbar32", L"",
-        WS_CHILD|WS_VISIBLE|TBS_HORZ|TBS_AUTOTICKS, 160, y-6, 300, 34,
+        WS_CHILD|WS_VISIBLE|TBS_HORZ|TBS_AUTOTICKS, 170, y-6, 300, 34,
         h, (HMENU)(INT_PTR)IDC_SLIDER, g_hInst, NULL);
     SendMessageW(g_hSlider, TBM_SETRANGE, TRUE, MAKELPARAM(1, 254));
     SendMessageW(g_hSlider, TBM_SETPOS, TRUE, 128);
-    LB(IDC_ST_THRESH, L"128", 470, 50);
+    LB(IDC_ST_THRESH, L"128", 480, 50);
     y += 40;
     CK(IDC_CHK_INVERT, L"پیکسل تیرهٔ تصویر = بافته‌شده (معمولی)", 10, 330);
     SendMessageW(GetDlgItem(h, IDC_CHK_INVERT), BM_SETCHECK, BST_CHECKED, 0);
@@ -625,46 +566,45 @@ static void create_controls(HWND h)
     RA(IDC_RAD_SHARP, L"مقیاس تیز (طرح خطی)", 185, 215);
     SendMessageW(GetDlgItem(h, IDC_RAD_SOFT), BM_SETCHECK, BST_CHECKED, 0);
     y += 34;
-    LB(0, L"نام طرح:", 10, 90);   ED(IDC_ED_NAME, 105, 150);
-    LB(0, L"تاریخ:", 270, 65);    ED(IDC_ED_DATE, 340, 85);
-    LB(0, L"تعداد ردیف:", 440, 105); ED(IDC_ED_ROWS, 550, 80);
+    BT(IDC_BTN_MAKE, L"ساخت فایل فلاپی", 10, 200, 36);
+    g_hOut = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE,
+        220, y+8, 410, 22, h, (HMENU)(INT_PTR)IDC_ST_OUT, g_hInst, NULL);
+    SendMessageW(g_hOut, WM_SETFONT, (WPARAM)hfa, 0);
+    y += 44;
+    LB(IDC_ST_TPL, L"قالب مقاله: داخلی (2224_2)", 10, 480);
+    y += 26;
+    BT(IDC_BTN_TPL_FILE, L"قالب از فایل (مقالهٔ دیگر)…", 10, 265, 28);
     y += 36;
-    BT(IDC_BTN_SAVE,  L"ذخیرهٔ فایل(های) فلاپی…", 10, 225);
-    BT(IDC_BTN_WRITE, L"نوشتن روی فلاپی A:", 245, 200);
-    y += 42;
 
     g_hPreview = CreateWindowExW(WS_EX_NOINHERITLAYOUT, L"KNITPREVIEW", L"",
         WS_CHILD|WS_VISIBLE|WS_BORDER, 10, y, 600, 380,
         h, (HMENU)(INT_PTR)IDC_PREVIEW, g_hInst, NULL);
 
-    g_hStatus = CreateWindowW(L"STATIC", L"آماده.", WS_CHILD|WS_VISIBLE,
-        10, y+390, 600, 24, h, (HMENU)(INT_PTR)999, g_hInst, NULL);
+    g_hStatus = CreateWindowW(L"STATIC", L"آماده — تصویر را باز کنید.",
+        WS_CHILD|WS_VISIBLE, 10, y+390, 620, 24, h, (HMENU)(INT_PTR)999, g_hInst, NULL);
     SendMessageW(g_hStatus, WM_SETFONT, (WPARAM)hfa, 0);
-    enable_ui(h, 0, 0);
-    EnableWindow((HWND)get_btn(h, IDC_BTN_IMG), FALSE);
-    EnableWindow((HWND)get_btn(h, IDC_BTN_SAVE), FALSE);
-    EnableWindow((HWND)get_btn(h, IDC_BTN_WRITE), FALSE);
+    EnableWindow(GetDlgItem(h, IDC_BTN_MAKE), FALSE);
 }
 
 static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
     switch (m) {
     case WM_CREATE:
+        init_embedded_template();
         create_controls(h);
         return 0;
     case WM_COMMAND:
         switch (LOWORD(wp)) {
-        case IDC_BTN_TPL_FILE:   load_template_file(h); return 0;
-        case IDC_BTN_TPL_FLOPPY: load_template_floppy(h); return 0;
-        case IDC_BTN_IMG:        load_image(h); return 0;
-        case IDC_BTN_SAVE:       save_disks(h); return 0;
-        case IDC_BTN_WRITE:      write_floppy(h); return 0;
+        case IDC_BTN_IMG:      load_image(h); return 0;
+        case IDC_BTN_MAKE:     make_output(h); return 0;
+        case IDC_BTN_TPL_FILE: load_template_file(h); return 0;
         case IDC_CHK_INVERT:
         case IDC_RAD_SOFT:
         case IDC_RAD_SHARP:
             if (HIWORD(wp) == BN_CLICKED) rebuild_design(h);
             return 0;
         case IDC_ED_ROWS:
+        case IDC_ED_WIDTH:
             if (HIWORD(wp) == EN_CHANGE && !g_updating && g_hasTpl && g_bmp)
                 rebuild_design(h);
             return 0;
@@ -770,8 +710,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
     RegisterClassW(&wc);
 
     h = CreateWindowExW(WS_EX_LAYOUTRTL | WS_EX_APPWINDOW, L"KNITMAIN",
-        L"طرح‌باف — تصویر به فلاپی بافندگی جاکوارد (Karl Mayer TDC)",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 680, 810,
+        L"طرح‌باف — تصویر به فایل فلاپی بافندگی جاکوارد (Karl Mayer TDC)",
+        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 680, 800,
         NULL, NULL, inst, NULL);
     ShowWindow(h, show);
     UpdateWindow(h);
