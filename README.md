@@ -1,8 +1,8 @@
-# طرح‌باف (TDC Knitter)
+# طرح‌باف TDC (TarhBaf TDC)
 
 **English:** A small, dependency-free Windows program that converts an image into a
 1.44 MB floppy-disk image for **Karl Mayer TDC** jacquard knitting machines
-(Textronic Design Center era software, ~1991). It replaces the original DOS
+(the "TDC" DOS software family, ~1991). It replaces the original DOS
 converter with a modern one-file `knitter.exe`: pick a picture, get a floppy
 image you can write to a disk with any raw-image tool.
 
