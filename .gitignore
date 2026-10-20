@@ -1,0 +1,10 @@
+samples/
+testdata/
+exp/
+dosrun/
+tdc_embedded.h
+knitter.tpl
+*.img
+*.o
+test_core
+test_dos
