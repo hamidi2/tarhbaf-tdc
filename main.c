@@ -155,6 +155,7 @@ static void rebuild_design(HWND h)
 
     g_tpl.width_px = Wpx;
     g_tpl.width_bits = Wbits;
+    g_tpl.height = H;   /* height=0 in the header -> 'incorrect machine floppy format' */
 
     free_design();
     g_designW = Wbits; g_designH = H;
@@ -333,12 +334,13 @@ static void load_image(HWND h)
         SetWindowTextW(GetDlgItem(h, IDC_ED_NAME), base);
         today_str(rows, 16);
         SetWindowTextW(GetDlgItem(h, IDC_ED_DATE), rows);
-        /* rows default from the design width (پیکسل) */
+        /* mirror the image exactly, like PC-CONV does with a TIF:
+           width = image width, rows = image height (no silent resample) */
         {
-            int wpx = ui_int(h, IDC_ED_WIDTH, EMB_WIDTH_PX);
-            _snwprintf(rows, 16, L"%d",
-                       g_srcH ? (int)((int64_t)g_srcH * wpx / g_srcW) : 512);
             g_updating = 1;
+            _snwprintf(rows, 16, L"%d", clampi(g_srcW, 8, 4096));
+            SetWindowTextW(GetDlgItem(h, IDC_ED_WIDTH), rows);
+            _snwprintf(rows, 16, L"%d", g_srcH ? g_srcH : 512);
             SetWindowTextW(GetDlgItem(h, IDC_ED_ROWS), rows);
             g_updating = 0;
         }
@@ -369,6 +371,7 @@ static int build_disks(HWND h)
     asciiify(wname, aname, TDC_NAME_MAX);
     if (!aname[0]) strcpy(aname, "DESIGN");
     strcpy(g_tpl.name, aname);
+    g_tpl.height = rows;    /* safety: never let height be stale/zero */
     {
         WCHAR wdate[32];
         GetWindowTextW(GetDlgItem(h, IDC_ED_DATE), wdate, 32);
