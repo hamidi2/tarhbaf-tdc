@@ -16,8 +16,8 @@ image you can write to a disk with any raw-image tool.
 
 - Input: BMP / JPG / PNG / TIF / GIF → output: 1.44 MB floppy image (`.img`)
   ready for WinImage / RawWrite / `dd`.
-- Automatic width & height from the image (same as the original DOS converter:
-  a 1648×512 TIF becomes a 1648-wide, 512-row pattern), adjustable for photos.
+- Design size = image size, exactly like the original DOS converter: a
+  1648×512 TIF becomes a 1648-wide, 512-row pattern. No fields to fill in.
 - 1-bit threshold with live preview, soft (photo) or sharp (line-art) scaling.
 - Multi-disk designs are split automatically (disk 1 = bottom rows, disk 2 = top).
 - Full on-disk format implemented and **verified byte-for-byte** against
@@ -46,8 +46,8 @@ machines and your own designs.
 1. اولین بار: **قالب از فایل…** → یک ایمیج فلاپی کارکردهٔ همان مقاله
    (خروجی Read Floppy یا ایمیج خام ۱٫۴۴ مگابایتی). تنظیمات در `knitter.tpl`
    ذخیره می‌شود و دیگر لازم نیست تکرار شود.
-2. **بازکردن تصویر…** — نام طرح و تاریخ خودکار پر می‌شوند؛ عرض/ارتفاع = ابعاد
-   خود تصویر (برای عکس می‌توانید تغییر دهید تا مقیاس شود).
+2. **بازکردن تصویر…** — نام طرح و تاریخ خودکار پر می‌شوند؛ اندازهٔ طرح =
+   ابعاد خود تصویر (دقیقاً مثل برنامهٔ اصلی که TIF را همان‌طور می‌گیرد).
 3. آستانهٔ سیاه/سفید و نوع مقیاس (نرم برای عکس، تیز برای طرح خطی) را تنظیم کنید؛
    پیش‌نمایش همان چیزی است که بافته می‌شود (پیکسل تیره = بافته).
 4. **ساخت فایل فلاپی** — فایل `.img` کنار تصویر ساخته می‌شود؛ طرح‌های بلند
