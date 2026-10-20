@@ -3,3 +3,5 @@ testdata/
 *.o
 test_core
 dosrun/
+tdc_embedded.h
+knitter.tpl

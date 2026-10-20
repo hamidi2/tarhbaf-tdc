@@ -18,7 +18,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include "tdc_format.h"
+#ifdef USE_EMBEDDED
 #include "tdc_embedded.h"
+#endif
 
 /* ---------------- controls ---------------- */
 #define IDC_BTN_IMG        103
@@ -102,10 +104,34 @@ static int ui_int(HWND h, int id, int def)
     return v ? v : def;
 }
 
-/* embedded template (the reference machine's article) */
-static void init_embedded_template(void)
+/* Machine/article settings (param block, LAENGE, trailer) are NOT shipped with
+ * this program — they belong to the licensed Karl Mayer setup of each user.
+ * The template is read once from a reference floppy image of the user's own
+ * article ("قالب از فایل") and cached in knitter.tpl next to the exe.
+ * The private build (-DUSE_EMBEDDED with a locally generated tdc_embedded.h)
+ * pre-loads the same pieces at compile time instead. */
+#ifndef USE_EMBEDDED
+static WCHAR g_tplCachePath[MAX_PATH];
+#endif
+#define TPL_CACHE_MAGIC 0x31504E4BUL   /* "KNP1" */
+
+#ifndef USE_EMBEDDED
+static void build_cache_path(void)
+{
+    WCHAR *slash;
+    GetModuleFileNameW(NULL, g_tplCachePath, MAX_PATH);
+    slash = wcsrchr(g_tplCachePath, L'\\');
+    if (slash) *(slash + 1) = 0;
+    wcscat(g_tplCachePath, L"knitter.tpl");
+}
+#endif
+
+static void init_template_state(void)
 {
     memset(&g_tpl, 0, sizeof g_tpl);
+    strcpy(g_tpl.name, "DESIGN");
+    strcpy(g_tpl.date, "01.01.00");
+#ifdef USE_EMBEDDED
     memcpy(g_tpl.param, emb_param88, 88);
     memcpy(g_tpl.laenge, emb_laenge, EMB_LAENGE_LEN);
     g_tpl.laenge_len = EMB_LAENGE_LEN;
@@ -113,10 +139,53 @@ static void init_embedded_template(void)
     g_tpl.trailer_len = EMB_TRAILER_LEN;
     g_tpl.width_bits = EMB_WIDTH_BITS;
     g_tpl.width_px   = EMB_WIDTH_PX;
-    strcpy(g_tpl.name, "DESIGN");
-    strcpy(g_tpl.date, "01.01.00");
     g_hasTpl = 1;
+#else
+    build_cache_path();
+    {
+        FILE *f = _wfopen(g_tplCachePath, L"rb");
+        uint32_t magic;
+        uint16_t wb, wp;
+        int rlen;
+        if (!f) return;
+        if (fread(&magic, 4, 1, f) != 1 || magic != TPL_CACHE_MAGIC) { fclose(f); return; }
+        if (fread(&wb, 2, 1, f) != 1 || fread(&wp, 2, 1, f) != 1) { fclose(f); return; }
+        if (fread(g_tpl.param, 1, 88, f) != 88) { fclose(f); return; }
+        if (fread(&rlen, 4, 1, f) != 1 || rlen < 0 || rlen > TDC_BLOCK) { fclose(f); return; }
+        g_tpl.laenge_len = rlen;
+        if (rlen && fread(g_tpl.laenge, 1, rlen, f) != (size_t)rlen) { fclose(f); return; }
+        if (fread(&g_tpl.trailer_len, 4, 1, f) != 1 || g_tpl.trailer_len < 0 ||
+            g_tpl.trailer_len > TDC_TRAILER_MAX) { fclose(f); return; }
+        if (g_tpl.trailer_len &&
+            fread(g_tpl.trailer, 1, g_tpl.trailer_len, f) != (size_t)g_tpl.trailer_len) {
+            fclose(f); return;
+        }
+        fclose(f);
+        g_tpl.width_bits = wb;
+        g_tpl.width_px   = wp;
+        g_hasTpl = 1;
+    }
+#endif
 }
+
+#ifndef USE_EMBEDDED
+static void save_template_cache(void)
+{
+    FILE *f = _wfopen(g_tplCachePath, L"wb");
+    uint32_t magic = TPL_CACHE_MAGIC;
+    uint16_t wb = (uint16_t)g_tpl.width_bits, wp = (uint16_t)g_tpl.width_px;
+    if (!f) return;
+    fwrite(&magic, 4, 1, f);
+    fwrite(&wb, 2, 1, f);
+    fwrite(&wp, 2, 1, f);
+    fwrite(g_tpl.param, 1, 88, f);
+    fwrite(&g_tpl.laenge_len, 4, 1, f);
+    if (g_tpl.laenge_len) fwrite(g_tpl.laenge, 1, g_tpl.laenge_len, f);
+    fwrite(&g_tpl.trailer_len, 4, 1, f);
+    if (g_tpl.trailer_len) fwrite(g_tpl.trailer, 1, g_tpl.trailer_len, f);
+    fclose(f);
+}
+#endif
 
 /* ---------------- image → design ---------------- */
 static void free_design(void)
@@ -141,7 +210,7 @@ static void rebuild_design(HWND h)
 
     if (!g_hasTpl || !g_bmp) return;
 
-    Wpx = clampi(ui_int(h, IDC_ED_WIDTH, EMB_WIDTH_PX), 8, 4096);
+    Wpx = clampi(ui_int(h, IDC_ED_WIDTH, g_tpl.width_px ? g_tpl.width_px : 1024), 8, 4096);
     Wbits = (Wpx + 7) / 8 * 8;
     g_updating = 1;
     _snwprintf(tmp, 16, L"%d", Wpx);
@@ -282,6 +351,11 @@ static void load_template_file(HWND h)
     }
     g_tpl = t2;
     g_hasTpl = 1;
+#ifndef USE_EMBEDDED
+    build_cache_path();
+    save_template_cache();
+#endif
+    EnableWindow(GetDlgItem(h, IDC_BTN_IMG), TRUE);
     {
         const WCHAR *fn = wcsrchr(file, L'\\');
         WCHAR info[512], aname[TDC_NAME_MAX];
@@ -550,7 +624,7 @@ static void create_controls(HWND h)
     LB(0, L"تعداد ردیف:", 270, 105);      ED(IDC_ED_ROWS, 380, 80);
     {
         WCHAR t[16];
-        _snwprintf(t, 16, L"%d", EMB_WIDTH_PX);
+        _snwprintf(t, 16, L"%d", g_tpl.width_px ? g_tpl.width_px : 1024);
         SetWindowTextW(GetDlgItem(h, IDC_ED_WIDTH), t);
     }
     y += 32;
@@ -574,7 +648,15 @@ static void create_controls(HWND h)
         220, y+8, 410, 22, h, (HMENU)(INT_PTR)IDC_ST_OUT, g_hInst, NULL);
     SendMessageW(g_hOut, WM_SETFONT, (WPARAM)hfa, 0);
     y += 44;
-    LB(IDC_ST_TPL, L"قالب مقاله: داخلی (2224_2)", 10, 480);
+#ifdef USE_EMBEDDED
+    LB(IDC_ST_TPL, L"قالب مقاله: داخلی", 10, 480);
+#else
+    if (g_hasTpl) {
+        LB(IDC_ST_TPL, L"قالب مقاله: از کش knitter.tpl بارگذاری شد.", 10, 480);
+    } else {
+        LB(IDC_ST_TPL, L"قالب مقاله: هنوز تنظیم نشده — یک فلاپی کارکردهٔ همان مقاله را با «قالب از فایل» باز کنید.", 10, 620);
+    }
+#endif
     y += 26;
     BT(IDC_BTN_TPL_FILE, L"قالب از فایل (مقالهٔ دیگر)…", 10, 265, 28);
     y += 36;
@@ -587,13 +669,16 @@ static void create_controls(HWND h)
         WS_CHILD|WS_VISIBLE, 10, y+390, 620, 24, h, (HMENU)(INT_PTR)999, g_hInst, NULL);
     SendMessageW(g_hStatus, WM_SETFONT, (WPARAM)hfa, 0);
     EnableWindow(GetDlgItem(h, IDC_BTN_MAKE), FALSE);
+#ifndef USE_EMBEDDED
+    EnableWindow(GetDlgItem(h, IDC_BTN_IMG), g_hasTpl);
+#endif
 }
 
 static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
 {
     switch (m) {
     case WM_CREATE:
-        init_embedded_template();
+        init_template_state();
         create_controls(h);
         return 0;
     case WM_COMMAND:
