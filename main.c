@@ -60,7 +60,6 @@ static int g_designW, g_designH;
 
 static uint8_t *g_disk1, *g_disk2;
 static int g_ndisks;
-static int g_updating;
 
 /* ---------------- helpers ---------------- */
 static void SetStatus(const WCHAR *fmt, ...)
@@ -94,15 +93,6 @@ static void today_str(WCHAR *buf, int n)
 }
 
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
-
-static int ui_int(HWND h, int id, int def)
-{
-    WCHAR tmp[16];
-    int v;
-    GetWindowTextW(GetDlgItem(h, id), tmp, 16);
-    v = _wtoi(tmp);
-    return v ? v : def;
-}
 
 /* Machine/article settings (param block, LAENGE, trailer) are NOT shipped with
  * this program — they belong to the licensed Karl Mayer setup of each user.
@@ -205,22 +195,14 @@ static void rebuild_design(HWND h)
     int soft = SendMessageW(GetDlgItem(h, IDC_RAD_SOFT), BM_GETCHECK, 0, 0) == BST_CHECKED;
     int thresh = (int)SendMessageW(g_hSlider, TBM_GETPOS, 0, 0);
     int Wpx, Wbits, H, x, y;
-    WCHAR tmp[16];
     uint8_t *lum = NULL;
 
     if (!g_hasTpl || !g_bmp) return;
 
-    Wpx = clampi(ui_int(h, IDC_ED_WIDTH, g_tpl.width_px ? g_tpl.width_px : 1024), 8, 4096);
+    /* like the original DOS converter: design size = image size */
+    Wpx = clampi(g_srcW, 8, 4096);
     Wbits = (Wpx + 7) / 8 * 8;
-    g_updating = 1;
-    _snwprintf(tmp, 16, L"%d", Wpx);
-    SetWindowTextW(GetDlgItem(h, IDC_ED_WIDTH), tmp);
-    g_updating = 0;
-    H = clampi(ui_int(h, IDC_ED_ROWS, 1), 1, 60000);
-    g_updating = 1;
-    _snwprintf(tmp, 16, L"%d", H);
-    SetWindowTextW(GetDlgItem(h, IDC_ED_ROWS), tmp);
-    g_updating = 0;
+    H = clampi(g_srcH, 1, 60000);
 
     g_tpl.width_px = Wpx;
     g_tpl.width_bits = Wbits;
@@ -408,16 +390,6 @@ static void load_image(HWND h)
         SetWindowTextW(GetDlgItem(h, IDC_ED_NAME), base);
         today_str(rows, 16);
         SetWindowTextW(GetDlgItem(h, IDC_ED_DATE), rows);
-        /* mirror the image exactly, like PC-CONV does with a TIF:
-           width = image width, rows = image height (no silent resample) */
-        {
-            g_updating = 1;
-            _snwprintf(rows, 16, L"%d", clampi(g_srcW, 8, 4096));
-            SetWindowTextW(GetDlgItem(h, IDC_ED_WIDTH), rows);
-            _snwprintf(rows, 16, L"%d", g_srcH ? g_srcH : 512);
-            SetWindowTextW(GetDlgItem(h, IDC_ED_ROWS), rows);
-            g_updating = 0;
-        }
         SetWindowTextW(GetDlgItem(h, IDC_ST_OUT), L"");
     }
     rebuild_design(h);
@@ -620,14 +592,6 @@ static void create_controls(HWND h)
     LB(0, L"نام طرح:", 10, 90);           ED(IDC_ED_NAME, 105, 150);
     LB(0, L"تاریخ:", 270, 65);            ED(IDC_ED_DATE, 340, 85);
     y += 32;
-    LB(0, L"عرض طرح (پیکسل):", 10, 150);  ED(IDC_ED_WIDTH, 165, 80);
-    LB(0, L"تعداد ردیف:", 270, 105);      ED(IDC_ED_ROWS, 380, 80);
-    {
-        WCHAR t[16];
-        _snwprintf(t, 16, L"%d", g_tpl.width_px ? g_tpl.width_px : 1024);
-        SetWindowTextW(GetDlgItem(h, IDC_ED_WIDTH), t);
-    }
-    y += 32;
     LB(0, L"آستانهٔ سیاه/سفید:", 10, 150);
     g_hSlider = CreateWindowW(L"msctls_trackbar32", L"",
         WS_CHILD|WS_VISIBLE|TBS_HORZ|TBS_AUTOTICKS, 170, y-6, 300, 34,
@@ -690,11 +654,6 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         case IDC_RAD_SOFT:
         case IDC_RAD_SHARP:
             if (HIWORD(wp) == BN_CLICKED) rebuild_design(h);
-            return 0;
-        case IDC_ED_ROWS:
-        case IDC_ED_WIDTH:
-            if (HIWORD(wp) == EN_CHANGE && !g_updating && g_hasTpl && g_bmp)
-                rebuild_design(h);
             return 0;
         }
         break;
