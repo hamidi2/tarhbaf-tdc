@@ -250,10 +250,13 @@ static void rebuild_design(HWND h)
 
     if (!g_hasTpl || !g_bmp) return;
 
-    /* like the original DOS converter: design size = image size */
+    /* like the original DOS converter: design size = image size; but the
+     * converter enforces a minimum pattern height of 192 by repeating rows
+     * (96-row TIF -> 192-row pattern, each row knitted twice) */
     Wpx = clampi(g_srcW, 8, 4096);
     Wbits = (Wpx + 7) / 8 * 8;
     H = clampi(g_srcH, 1, 60000);
+    while (H < 192) H *= 2;
 
     g_tpl.width_px = Wpx;
     g_tpl.width_bits = Wbits;
