@@ -26,8 +26,18 @@ OTHER SOLVED FIELDS:
       S = ceil((512 + pitch*h) / 256), pitch = rb + 2   (sector count)
   LAENGE[1] = len & 0xFF
   tail2 = [rb-1, (256-rb)&0xFF]  (== BE16 of rb*255)
-  body = rows of `pitch` bytes, mostly 0xFF with small zero-gaps (or inverse);
-         gap position moves with h (w1016: byte 41 - (h-128)/32 for h128/256/512)
+  BODY STRUCTURE (batch2, dense h-sweep, 27 more rounds):
+    body = 0xFF field + marker M=[rb-1, 256-rb] every `pitch` bytes, with the
+    marker grid ANCHORED TO FILE END (last marker at len-2 == tail2; earlier
+    markers at len-2-k*pitch). All apparent "moving gaps" = phase
+    (len-2) mod pitch — fully determined by len. VERIFIED on ~40 files.
+    DATA CONTENT (ground weave bitmap): sparse 0x00 bytes/regions inside the FF
+    field, positions ≡ z0 (mod pitch):
+      w1016: z0 = 43 - (h-128)/32, plus +65 (=pitch/2) when h ≡ 32 (mod 64)
+             — verified h96..h544, 12 points
+    Some (w,h) are 00-majority instead of FF-majority (e.g. w1648h320,
+    w800h96/448/480, w1000h256) — polarity + region layout = ground weave
+    mapping, still to crack (needs DEF ground-config decode).
 
 Verified examples:
   w1648 (rb206,s16): h128→180, h192→1204, h256→180, h320→1204, h448→1204,
