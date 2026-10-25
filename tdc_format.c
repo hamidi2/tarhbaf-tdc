@@ -213,6 +213,13 @@ int tdc_build_disk(const tdc_template *tpl, const uint8_t *rows, int nrows,
     put_be16(par + 28, disk2_rows);
     put_be16(par + 42, tpl->height);
     put_be16(par + 62, tpl->width_px);
+    /* byte 87 fingerprint: 3*(ord(name[2]) + (day-1)%10 - 26) — از باتری‌های
+       PC-CONV/DOSBox (exp/battery_*.sh)؛ نام‌های ≤2 حرف/کوچک همان مقادیر
+       fallback را می‌دهند، پس مستقیم از نام واقعی محاسبه می‌کنیم */
+    if (strlen(tpl->name) >= 3) {
+        int day = atoi(tpl->date);              /* dd.mm.yy */
+        par[87] = (uint8_t)((3 * ((uint8_t)tpl->name[2] + (day > 0 ? (day - 1) % 10 : 0) - 26)) & 0xFF);
+    }
 
     make_ascii_header(hdr, tpl->name, tpl->date);
     chk = 0;
