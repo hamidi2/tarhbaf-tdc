@@ -23,7 +23,10 @@ LEN FORMULA — SOLVED (2026-10-25, verified 51/51 points, 20 widths, h∈32..76
 
 OTHER SOLVED FIELDS:
   LAENGE[0] = S div 256, LAENGE[2] = S mod 256,
-      S = ceil((512 + pitch*h) / 256), pitch = rb + 2   (sector count)
+      S = (640 + pitch*h) // 256   (= round((512+pitch*h)/256); verified 74/74,
+      also explains real 2003 sample 2224_2 b2=0x26 with floor semantics)
+      pitch = rb + 2. If content+trailer exceeds the block, the trailer is
+      truncated at block end (w800h480: len=2036, trailer="Copyright (C" cut).
   LAENGE[1] = len & 0xFF
   tail2 = [rb-1, (256-rb)&0xFF]  (== BE16 of rb*255)
   BODY STRUCTURE (batch2, dense h-sweep, 27 more rounds):
