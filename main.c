@@ -38,6 +38,7 @@
 #define IDC_BTN_TPL_FILE   118
 #define IDC_ST_OUT         119
 #define IDC_CB_TPL         120
+#define IDC_BTN_ADV        121
 
 #define FLOPPY_SIZE TDC_DISK_SIZE
 
@@ -46,6 +47,7 @@ static HINSTANCE g_hInst;
 static HWND g_hPreview, g_hStatus, g_hSlider, g_hOut;
 static tdc_template g_tpl;
 static int g_hasTpl;
+static int g_advOpen, g_advY0, g_advY1;
 
 /* source image (GDI+) */
 static GpBitmap *g_bmp;
@@ -519,36 +521,54 @@ static void create_controls(HWND h)
         SendMessageW(t, WM_SETFONT, (WPARAM)hfa, 0); }
 
     BT(IDC_BTN_IMG, L"بازکردن تصویر…", 10, 180, 32);
+    LB(IDC_ST_IMG, L"تصویری باز نشده.", 210, 500);
     y += 38;
-    LB(IDC_ST_IMG, L"تصویری باز نشده.", 10, 620);
-    y += 30;
     LB(0, L"نام طرح:", 10, 90);           ED(IDC_ED_NAME, 105, 150);
-    LB(0, L"تاریخ:", 270, 65);            ED(IDC_ED_DATE, 340, 85);
     y += 32;
-    LB(0, L"آستانهٔ سیاه/سفید:", 10, 150);
-    g_hSlider = CreateWindowW(L"msctls_trackbar32", L"",
-        WS_CHILD|WS_VISIBLE|TBS_HORZ|TBS_AUTOTICKS, 170, y-6, 300, 34,
-        h, (HMENU)(INT_PTR)IDC_SLIDER, g_hInst, NULL);
-    SendMessageW(g_hSlider, TBM_SETRANGE, TRUE, MAKELPARAM(1, 254));
-    SendMessageW(g_hSlider, TBM_SETPOS, TRUE, 128);
-    LB(IDC_ST_THRESH, L"128", 480, 50);
-    y += 40;
-    CK(IDC_CHK_INVERT, L"پیکسل تیرهٔ تصویر = بافته‌شده (معمولی)", 10, 330);
-    SendMessageW(GetDlgItem(h, IDC_CHK_INVERT), BM_SETCHECK, BST_CHECKED, 0);
-    y += 30;
-    RA(IDC_RAD_SOFT, L"مقیاس نرم (عکس)", 10, 165);
-    RA(IDC_RAD_SHARP, L"مقیاس تیز (طرح خطی)", 185, 215);
-    SendMessageW(GetDlgItem(h, IDC_RAD_SOFT), BM_SETCHECK, BST_CHECKED, 0);
-    y += 34;
     BT(IDC_BTN_MAKE, L"ساخت فایل فلاپی", 10, 200, 36);
     g_hOut = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE,
         220, y+8, 410, 22, h, (HMENU)(INT_PTR)IDC_ST_OUT, g_hInst, NULL);
     SendMessageW(g_hOut, WM_SETFONT, (WPARAM)hfa, 0);
     y += 44;
-    LB(IDC_ST_TPL, L"قالب مقاله: مولد داخلی (LAENGE فرمولی)", 10, 620);
-    y += 26;
-    BT(IDC_BTN_TPL_FILE, L"قالب از فایل (افزودن مقالهٔ تازه)…", 10, 265, 28);
-    y += 36;
+
+    /* ---- تنظیمات پیشرفته (پیش‌فرض بسته) ---- */
+    BT(IDC_BTN_ADV, L"تنظیمات پیشرفته ▸", 10, 200, 28);
+    y += 34;
+    {
+        int ay = y;
+        LB(0, L"تاریخ (خودکار از ویندوز):", 10, 210);  ED(IDC_ED_DATE, 230, 90);
+        y += 32;
+        LB(0, L"آستانهٔ سیاه/سفید (فقط برای عکس):", 10, 260);
+        g_hSlider = CreateWindowW(L"msctls_trackbar32", L"",
+            WS_CHILD|TBS_HORZ|TBS_AUTOTICKS, 280, y-6, 300, 34,
+            h, (HMENU)(INT_PTR)IDC_SLIDER, g_hInst, NULL);
+        SendMessageW(g_hSlider, TBM_SETRANGE, TRUE, MAKELPARAM(1, 254));
+        SendMessageW(g_hSlider, TBM_SETPOS, TRUE, 128);
+        LB(IDC_ST_THRESH, L"128", 590, 50);
+        y += 40;
+        CK(IDC_CHK_INVERT, L"پیکسل تیرهٔ تصویر = بافته‌شده (معمولی)", 10, 330);
+        SendMessageW(GetDlgItem(h, IDC_CHK_INVERT), BM_SETCHECK, BST_CHECKED, 0);
+        y += 30;
+        RA(IDC_RAD_SOFT, L"مقیاس نرم (عکس)", 10, 165);
+        RA(IDC_RAD_SHARP, L"مقیاس تیز (طرح خطی)", 185, 215);
+        SendMessageW(GetDlgItem(h, IDC_RAD_SOFT), BM_SETCHECK, BST_CHECKED, 0);
+        y += 30;
+        LB(IDC_ST_TPL, L"قالب مقاله: مولد داخلی", 10, 400);
+        BT(IDC_BTN_TPL_FILE, L"قالب از فایل…", 430, 160, 26);
+        y += 34;
+        /* مخفی تا باز شدن */
+        {
+            HWND hh[9] = { GetDlgItem(h,IDC_ED_DATE), GetDlgItem(h,IDC_SLIDER),
+                GetDlgItem(h,IDC_ST_THRESH), GetDlgItem(h,IDC_CHK_INVERT),
+                GetDlgItem(h,IDC_RAD_SOFT), GetDlgItem(h,IDC_RAD_SHARP),
+                GetDlgItem(h,IDC_ST_TPL), GetDlgItem(h,IDC_BTN_TPL_FILE) };
+            int k;
+            for (k = 0; k < 8; k++) if (hh[k]) ShowWindow(hh[k], SW_HIDE);
+        }
+        g_advOpen = 0;
+        g_advY0 = ay;
+        g_advY1 = y;
+    }
 
     g_hPreview = CreateWindowExW(WS_EX_NOINHERITLAYOUT, L"KNITPREVIEW", L"",
         WS_CHILD|WS_VISIBLE|WS_BORDER, 10, y, 600, 380,
@@ -572,6 +592,34 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         case IDC_BTN_IMG:      load_image(h); return 0;
         case IDC_BTN_MAKE:     make_output(h); return 0;
         case IDC_BTN_TPL_FILE: load_template_file(h); return 0;
+        case IDC_BTN_ADV: {
+            int k;
+            HWND ids[8] = { GetDlgItem(h,IDC_ED_DATE), GetDlgItem(h,IDC_SLIDER),
+                            GetDlgItem(h,IDC_ST_THRESH), GetDlgItem(h,IDC_CHK_INVERT),
+                            GetDlgItem(h,IDC_RAD_SOFT), GetDlgItem(h,IDC_RAD_SHARP),
+                            GetDlgItem(h,IDC_ST_TPL), GetDlgItem(h,IDC_BTN_TPL_FILE) };
+            g_advOpen = !g_advOpen;
+            for (k = 0; k < 8; k++)
+                if (ids[k]) ShowWindow(ids[k], g_advOpen ? SW_SHOW : SW_HIDE);
+            /* جابه‌جایی پیش‌نمایش و وضعیت */
+            {
+                int dy = g_advOpen ? g_advY1 - g_advY0 : -(g_advY1 - g_advY0);
+                HWND mv[3] = { g_hPreview, g_hStatus, NULL };
+                int k2;
+                for (k2 = 0; k2 < 2; k2++) {
+                    RECT rc;
+                    if (!mv[k2]) continue;
+                    GetWindowRect(mv[k2], &rc);
+                    MapWindowPoints(NULL, h, (POINT *)&rc, 2);
+                    SetWindowPos(mv[k2], NULL, rc.left, rc.top + dy, 0, 0,
+                                 SWP_NOSIZE|SWP_NOZORDER);
+                }
+                SetWindowTextW(GetDlgItem(h, IDC_BTN_ADV),
+                               g_advOpen ? L"تنظیمات پیشرفته ▾" : L"تنظیمات پیشرفته ▸");
+            }
+            InvalidateRect(h, NULL, TRUE);
+            return 0;
+        }
 
         case IDC_CHK_INVERT:
         case IDC_RAD_SOFT:
