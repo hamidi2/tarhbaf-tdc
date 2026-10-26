@@ -113,3 +113,16 @@ if __name__ == '__main__':
         if len(la) == p: ok += 1
         else: bad += 1; print(f'{mark} w{w} h{h}: actual={len(la)} pred={p}')
     print(f'len-formula: {ok} OK, {bad} BAD')
+
+========== FINAL VERDICT (2026-10-26, acceptance test) ==========
+Synthetic floppy built entirely from formulas (MUSTER via python-ref core +
+LAENGE 100% synthetic: var4=0, formula canvas) was ACCEPTED by PC-CONV
+"Read Floppy" → TIF read back pixel-perfect (b == ~a, standard TIFF polarity).
+KEY RULE discovered via rejects: the design header DATE must match the date
+inside LAENGE's epoch (rejects were silent when 25.10.26 header met a
+26.10.26 LAENGE) — same root cause as error #140. So a converter must keep
+header date and LAENGE date consistent — our generator writes both from one
+value, which is exactly what PC-CONV does.
+=> tdc_format.c can now generate LAENGE purely: var4 bytes are NOT validated
+   (zeros accepted), canvas polarity not validated. Remaining unknowns are
+   cosmetic for WRITE-compat. Template dependency can be dropped.
