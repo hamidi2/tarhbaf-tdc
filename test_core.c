@@ -44,9 +44,9 @@ int main(int argc, char **argv)
     }
     if ((int)rows_len != H * (W / 8)) { fprintf(stderr, "rows size mismatch\n"); return 1; }
 
-    printf("template: name='%s' date='%s' wbits=%d wpx=%d h=%d laenge=%d trailer=%d\n",
+    printf("template: name='%s' date='%s' wbits=%d wpx=%d h=%d trailer=%d\n",
            tpl.name, tpl.date, tpl.width_bits, tpl.width_px, tpl.height,
-           tpl.laenge_len, tpl.trailer_len);
+           tpl.trailer_len);
 
     rc = tdc_build_disk(&tpl, rows, H, 1, 1, H, 0, 0, out);
     if (rc) { fprintf(stderr, "build_disk failed: %d\n", rc); return 1; }

@@ -13,11 +13,14 @@
 #define TDC_DATA_BLOCK_LAST  2878   /* last block reserved for LAENGE */
 
 typedef struct {
-    uint8_t  param[90];                /* from template; [88..89] checksum rebuilt */
-    uint8_t  laenge[TDC_BLOCK];        /* opaque LAENGE.FAC content */
-    int      laenge_len;
-    uint8_t  trailer[TDC_TRAILER_MAX]; /* opaque copyright block */
+    uint8_t  param[90];                /* machine config: param block minus dynamic fields ([88..89] checksum rebuilt) */
+    uint8_t  trailer[TDC_TRAILER_MAX]; /* machine config: copyright block (constant prefix; cut at block end) */
     int      trailer_len;
+    uint8_t  laenge[TDC_BLOCK];        /* optional: real LAENGE from a reference
+                                          floppy of the SAME article; if
+                                          laenge_len==0 the pure generator
+                                          (tdc_gen_laenge) is used instead */
+    int      laenge_len;
     int      width_bits;               /* packed design width in bits (mult. of 8) */
     int      width_px;                 /* real design width in pixels */
     int      height;                   /* total design rows */
@@ -25,8 +28,12 @@ typedef struct {
     char     date[16];                 /* dd.mm.yy */
 } tdc_template;
 
-/* Extract opaque pieces + geometry from an existing disk image. 0 = ok. */
+/* Extract machine-config pieces + geometry from an existing disk image. 0 = ok. */
 int tdc_parse_template(const uint8_t *disk, tdc_template *tpl);
+
+/* Generate the LAENGE.FAC block purely from (w, h) — proven against PC-CONV
+ * (acceptance test 2026-10-26, exp/laenge_model.py). Returns content length. */
+int tdc_gen_laenge(int w_bits, int h_rows, uint8_t *out /* TDC_BLOCK bytes */);
 
 /* Max rows one disk can hold for this template's geometry. */
 int tdc_rows_capacity(const tdc_template *tpl);

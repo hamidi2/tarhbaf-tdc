@@ -18,9 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "tdc_format.h"
-#ifdef USE_EMBEDDED
-#include "tdc_embedded.h"
-#endif
+#include "machine_cfg.h"
 
 /* ---------------- controls ---------------- */
 #define IDC_BTN_IMG        103
@@ -46,9 +44,6 @@
 /* ---------------- app state ---------------- */
 static HINSTANCE g_hInst;
 static HWND g_hPreview, g_hStatus, g_hSlider, g_hOut;
-#ifndef USE_EMBEDDED
-static HWND g_hCombo;
-#endif
 static tdc_template g_tpl;
 static int g_hasTpl;
 
@@ -98,135 +93,23 @@ static void today_str(WCHAR *buf, int n)
 
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
-/* Machine/article settings (param block, LAENGE, trailer) are NOT shipped with
- * this program — they belong to the licensed Karl Mayer setup of each user.
- * The template is read once from a reference floppy image of the user's own
- * article ("قالب از فایل") and cached in knitter.tpl next to the exe.
- * The private build (-DUSE_EMBEDDED with a locally generated tdc_embedded.h)
- * pre-loads the same pieces at compile time instead. */
-#ifndef USE_EMBEDDED
-static WCHAR g_tplDir[MAX_PATH];       /* <exedir>\templates */
-static HWND g_hCombo;
-#endif
-#define TPL_CACHE_MAGIC 0x31504E4BUL   /* "KNP1" */
-
-#ifndef USE_EMBEDDED
-static void build_tpl_dir(void)
-{
-    WCHAR *slash;
-    GetModuleFileNameW(NULL, g_tplDir, MAX_PATH);
-    slash = wcsrchr(g_tplDir, L'\\');
-    if (slash) *(slash + 1) = 0;
-    wcscat(g_tplDir, L"templates");
-    CreateDirectoryW(g_tplDir, NULL);
-}
-#endif
-
-#ifndef USE_EMBEDDED
-static int read_knp(FILE *f, tdc_template *t)
-{
-    uint32_t magic;
-    uint16_t wb, wp;
-    int rlen;
-    memset(t, 0, sizeof *t);
-    if (fread(&magic, 4, 1, f) != 1 || magic != TPL_CACHE_MAGIC) return -1;
-    if (fread(&wb, 2, 1, f) != 1 || fread(&wp, 2, 1, f) != 1) return -1;
-    if (fread(t->param, 1, 88, f) != 88) return -1;
-    if (fread(&rlen, 4, 1, f) != 1 || rlen < 0 || rlen > TDC_BLOCK) return -1;
-    t->laenge_len = rlen;
-    if (rlen && fread(t->laenge, 1, rlen, f) != (size_t)rlen) return -1;
-    if (fread(&t->trailer_len, 4, 1, f) != 1 || t->trailer_len < 0 ||
-        t->trailer_len > TDC_TRAILER_MAX) return -1;
-    if (t->trailer_len &&
-        fread(t->trailer, 1, t->trailer_len, f) != (size_t)t->trailer_len) return -1;
-    t->width_bits = wb;
-    t->width_px   = wp;
-    strcpy(t->name, "DESIGN");
-    strcpy(t->date, "01.01.00");
-    return 0;
-}
-#endif
-
-#ifndef USE_EMBEDDED
-static void write_knp(FILE *f, const tdc_template *t)
-{
-    uint32_t magic = TPL_CACHE_MAGIC;
-    uint16_t wb = (uint16_t)t->width_bits, wp = (uint16_t)t->width_px;
-    fwrite(&magic, 4, 1, f);
-    fwrite(&wb, 2, 1, f);
-    fwrite(&wp, 2, 1, f);
-    fwrite(t->param, 1, 88, f);
-    fwrite(&t->laenge_len, 4, 1, f);
-    if (t->laenge_len) fwrite(t->laenge, 1, t->laenge_len, f);
-    fwrite(&t->trailer_len, 4, 1, f);
-    if (t->trailer_len) fwrite(t->trailer, 1, t->trailer_len, f);
-}
-#endif
-
+/* Machine constants (param block static bytes + copyright trailer) are
+ * embedded from the operator's own reference floppy (machine_cfg.h) — they are
+ * machine/setup constants. LAENGE is generated purely by tdc_gen_laenge().
+ * Optional: a real same-article LAENGE can still be loaded via «قالب از فایل». */
 static void init_template_state(void)
 {
+    static const uint8_t p88[] = MCFG_PARAM88;
+    static const uint8_t tr[] = MCFG_TRAILER;
     memset(&g_tpl, 0, sizeof g_tpl);
     strcpy(g_tpl.name, "DESIGN");
     strcpy(g_tpl.date, "01.01.00");
-#ifdef USE_EMBEDDED
-    memcpy(g_tpl.param, emb_param88, 88);
-    memcpy(g_tpl.laenge, emb_laenge, EMB_LAENGE_LEN);
-    g_tpl.laenge_len = EMB_LAENGE_LEN;
-    memcpy(g_tpl.trailer, emb_trailer, EMB_TRAILER_LEN);
-    g_tpl.trailer_len = EMB_TRAILER_LEN;
-    g_tpl.width_bits = EMB_WIDTH_BITS;
-    g_tpl.width_px   = EMB_WIDTH_PX;
-    g_hasTpl = 1;
-#else
-    build_tpl_dir();
-    {
-        /* migrate old single-file cache */
-        WCHAR oldc[MAX_PATH], newc[MAX_PATH];
-        wcscpy(oldc, g_tplDir);
-        { WCHAR *s = wcsrchr(oldc, L'\\'); if (s) *(s+1) = 0; }
-        wcscat(oldc, L"knitter.tpl");
-        wcscpy(newc, g_tplDir);
-        wcscat(newc, L"\\knitter.tpl");
-        MoveFileW(oldc, newc);
-    }
-    {
-        /* load the first template, if any */
-        WCHAR pat[MAX_PATH], first[MAX_PATH];
-        WIN32_FIND_DATAW fd;
-        HANDLE h;
-        first[0] = 0;
-        _snwprintf(pat, MAX_PATH, L"%s\\*.tpl", g_tplDir);
-        h = FindFirstFileW(pat, &fd);
-        if (h != INVALID_HANDLE_VALUE) {
-            do {
-                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                    _snwprintf(first, MAX_PATH, L"%s\\%s", g_tplDir, fd.cFileName);
-                    break;
-                }
-            } while (FindNextFileW(h, &fd));
-            FindClose(h);
-        }
-        if (first[0]) {
-            FILE *f = _wfopen(first, L"rb");
-            if (f && read_knp(f, &g_tpl) == 0) g_hasTpl = 1;
-            if (f) fclose(f);
-        }
-    }
-#endif
+    memcpy(g_tpl.param, p88, 88);
+    memcpy(g_tpl.trailer, tr, sizeof tr);
+    g_tpl.trailer_len = (int)sizeof tr;
+    g_tpl.laenge_len = 0;             /* LAENGE from pure generator */
+    g_hasTpl = 1;                     /* config always present */
 }
-
-#ifndef USE_EMBEDDED
-static void save_template_file(const WCHAR *name)
-{
-    WCHAR path[MAX_PATH];
-    FILE *f;
-    _snwprintf(path, MAX_PATH, L"%s\\%s.tpl", g_tplDir, name);
-    f = _wfopen(path, L"wb");
-    if (!f) return;
-    write_knp(f, &g_tpl);
-    fclose(f);
-}
-#endif
 
 /* ---------------- image → design ---------------- */
 static void free_design(void)
@@ -387,22 +270,6 @@ static void load_template_file(HWND h)
     }
     g_tpl = t2;
     g_hasTpl = 1;
-#ifndef USE_EMBEDDED
-    {
-        char an[TDC_NAME_MAX];
-        WCHAR wname[TDC_NAME_MAX];
-        { int i; for (i = 0; i < TDC_NAME_MAX-1 && g_tpl.name[i]; i++)
-              an[i] = (g_tpl.name[i]=='\\' || g_tpl.name[i]=='/' || g_tpl.name[i]==':') ? '_' : g_tpl.name[i];
-          an[i] = 0; }
-        MultiByteToWideChar(CP_ACP, 0, an, -1, wname, TDC_NAME_MAX);
-        save_template_file(wname);
-        if (g_hCombo) {
-            int idx = (int)SendMessageW(g_hCombo, CB_FINDSTRINGEXACT, -1, (LPARAM)wname);
-            if (idx < 0) idx = (int)SendMessageW(g_hCombo, CB_ADDSTRING, 0, (LPARAM)wname);
-            SendMessageW(g_hCombo, CB_SETCURSEL, idx, 0);
-        }
-    }
-#endif
     EnableWindow(GetDlgItem(h, IDC_BTN_IMG), TRUE);
     {
         const WCHAR *fn = wcsrchr(file, L'\\');
@@ -678,38 +545,7 @@ static void create_controls(HWND h)
         220, y+8, 410, 22, h, (HMENU)(INT_PTR)IDC_ST_OUT, g_hInst, NULL);
     SendMessageW(g_hOut, WM_SETFONT, (WPARAM)hfa, 0);
     y += 44;
-#ifdef USE_EMBEDDED
-    LB(IDC_ST_TPL, L"قالب مقاله: داخلی", 10, 480);
-#else
-    if (g_hasTpl) {
-        LB(IDC_ST_TPL, L"قالب مقاله:", 10, 130);
-    } else {
-        LB(IDC_ST_TPL, L"قالب مقاله: هنوز تنظیم نشده — فلاپی مرجع مقاله را با «قالب از فایل» بدهید.", 10, 620);
-    }
-    g_hCombo = CreateWindowW(L"COMBOBOX", L"",
-        WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, 300, y, 260, 200,
-        h, (HMENU)(INT_PTR)IDC_CB_TPL, g_hInst, NULL);
-    SendMessageW(g_hCombo, WM_SETFONT, (WPARAM)hfa, 0);
-    {
-        WCHAR pat[MAX_PATH];
-        WIN32_FIND_DATAW fd;
-        HANDLE hf;
-        _snwprintf(pat, MAX_PATH, L"%s\\*.tpl", g_tplDir);
-        hf = FindFirstFileW(pat, &fd);
-        if (hf != INVALID_HANDLE_VALUE) {
-            do {
-                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                    WCHAR base[MAX_PATH];
-                    wcscpy(base, fd.cFileName);
-                    { WCHAR *d = wcsrchr(base, L'.'); if (d) *d = 0; }
-                    SendMessageW(g_hCombo, CB_ADDSTRING, 0, (LPARAM)base);
-                }
-            } while (FindNextFileW(hf, &fd));
-            FindClose(hf);
-        }
-        if (g_hasTpl) SendMessageW(g_hCombo, CB_SETCURSEL, 0, 0);
-    }
-#endif
+    LB(IDC_ST_TPL, L"قالب مقاله: مولد داخلی (LAENGE فرمولی)", 10, 620);
     y += 26;
     BT(IDC_BTN_TPL_FILE, L"قالب از فایل (افزودن مقالهٔ تازه)…", 10, 265, 28);
     y += 36;
@@ -722,9 +558,6 @@ static void create_controls(HWND h)
         WS_CHILD|WS_VISIBLE, 10, y+390, 620, 24, h, (HMENU)(INT_PTR)999, g_hInst, NULL);
     SendMessageW(g_hStatus, WM_SETFONT, (WPARAM)hfa, 0);
     EnableWindow(GetDlgItem(h, IDC_BTN_MAKE), FALSE);
-#ifndef USE_EMBEDDED
-    EnableWindow(GetDlgItem(h, IDC_BTN_IMG), g_hasTpl);
-#endif
 }
 
 static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
@@ -739,34 +572,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM wp, LPARAM lp)
         case IDC_BTN_IMG:      load_image(h); return 0;
         case IDC_BTN_MAKE:     make_output(h); return 0;
         case IDC_BTN_TPL_FILE: load_template_file(h); return 0;
-#ifndef USE_EMBEDDED
-        case IDC_CB_TPL:
-            if (HIWORD(wp) == CBN_SELCHANGE && g_hCombo) {
-                WCHAR nm[MAX_PATH], path[MAX_PATH];
-                int sel = (int)SendMessageW(g_hCombo, CB_GETCURSEL, 0, 0);
-                if (sel >= 0) {
-                    FILE *f;
-                    SendMessageW(g_hCombo, CB_GETLBTEXT, sel, (LPARAM)nm);
-                    _snwprintf(path, MAX_PATH, L"%s\\%s.tpl", g_tplDir, nm);
-                    f = _wfopen(path, L"rb");
-                    if (f) {
-                        tdc_template t2;
-                        if (read_knp(f, &t2) == 0) {
-                            WCHAR info[512], aname[TDC_NAME_MAX];
-                            g_tpl = t2;
-                            g_hasTpl = 1;
-                            MultiByteToWideChar(CP_ACP, 0, g_tpl.name, -1, aname, TDC_NAME_MAX);
-                            _snwprintf(info, 512, L"قالب مقاله: %s (عرض: %d پیکسل)", nm, g_tpl.width_px);
-                            SetWindowTextW(GetDlgItem(h, IDC_ST_TPL), info);
-                            EnableWindow(GetDlgItem(h, IDC_BTN_IMG), TRUE);
-                            if (g_bmp) rebuild_design(h);
-                        }
-                        fclose(f);
-                    }
-                }
-            }
-            return 0;
-#endif
+
         case IDC_CHK_INVERT:
         case IDC_RAD_SOFT:
         case IDC_RAD_SHARP:

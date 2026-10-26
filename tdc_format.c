@@ -123,12 +123,64 @@ int tdc_parse_template(const uint8_t *disk, tdc_template *tpl)
     for (i = 0; i + SIG_LEN <= TDC_BLOCK; i++)
         if (memcmp(lblk + i, SIG_COPYRIGHT, SIG_LEN) == 0) { sig = lblk + i; break; }
     if (!sig) { free(data); return -6; }
+    /* optional real LAENGE (same-article reference); generator is the default */
     tpl->laenge_len = (int)(sig - lblk);
     if (tpl->laenge_len > TDC_BLOCK) tpl->laenge_len = TDC_BLOCK;
     memcpy(tpl->laenge, lblk, tpl->laenge_len);
 
     free(data);
     return 0;
+}
+
+/* ---- LAENGE generator (fully reverse-engineered; see exp/laenge_model.py).
+ * Accepted byte-exact-equivalent by PC-CONV Read Floppy (acceptance 2026-10-26). */
+int tdc_gen_laenge(int w_bits, int h_rows, uint8_t *out)
+{
+    int wpb = (w_bits + 7) / 8;          /* real row bytes */
+    int rb = wpb + (wpb % 2);            /* padded to even (storage row bytes) */
+    int pitch = rb + 2;
+    int L = (180 + h_rows * ((rb % 64) + 2)) % 2048;
+    int S = (640 + pitch * h_rows) / 256;
+    uint8_t sep[3];
+    int sep_len;
+    int blobend, ph, s0, s, i, zb;
+
+    if (rb == wpb) {                     /* no pad byte: 2-byte marker */
+        sep[0] = (uint8_t)(rb - 1);
+        sep[1] = (uint8_t)(256 - rb);
+        sep_len = 2;
+    } else {                             /* padded width: 3-byte marker */
+        sep[0] = 0;
+        sep[1] = (uint8_t)(wpb - 1);
+        sep[2] = (uint8_t)(256 - wpb);
+        sep_len = 3;
+    }
+
+    memset(out, 0, TDC_BLOCK);
+    out[0] = (uint8_t)(S >> 8);
+    out[1] = (uint8_t)(L & 0xFF);
+    out[2] = (uint8_t)(S & 0xFF);
+
+    /* descriptor blob (machine-constant prefix; last 4 bytes not validated) */
+    zb = L - 1556;
+    blobend = 3;
+    if (zb >= 3 && zb + 20 <= L - 3) {
+        static const uint8_t blob[16] =
+            { 0x04, 0x00, 0x00, 0x02, 0x0e, 0x6e, 0x78, 0x6e,
+              0x61, 0x6c, 0x18, 0x12, 0x00, 0x00, 0x00, 0x00 };
+        memcpy(out + zb, blob, 16);
+        blobend = zb + 20;
+    }
+
+    /* marker grid anchored to tail (last marker at L-len(sep)); FF elsewhere */
+    ph = (L - sep_len) % pitch;
+    s0 = ph;
+    while (s0 < blobend) s0 += pitch;
+    for (i = blobend; i < L; i++)
+        if (out[i] == 0) out[i] = 0xFF;
+    for (s = s0; s + sep_len <= L; s += pitch)
+        memcpy(out + s, sep, sep_len);
+    return L;
 }
 
 int tdc_rows_capacity(const tdc_template *tpl)
@@ -274,8 +326,20 @@ int tdc_build_disk(const tdc_template *tpl, const uint8_t *rows, int nrows,
         memcpy(out + pos, tpl->trailer, n);
     }
     pos = laenge_block * TDC_BLOCK;
-    memcpy(out + pos, tpl->laenge, tpl->laenge_len);
-    pos += tpl->laenge_len;
+    if (tpl->laenge_len > 0) {
+        /* real LAENGE from a same-article reference floppy: byte-exact path */
+        memcpy(out + pos, tpl->laenge, tpl->laenge_len);
+        pos += tpl->laenge_len;
+    } else {
+        /* pure generator: accepted by PC-CONV (acceptance test 2026-10-26) */
+        uint8_t *la = (uint8_t *)malloc(TDC_BLOCK);
+        int la_len;
+        if (!la) { free(body); return -2; }
+        la_len = tdc_gen_laenge(tpl->width_bits, tpl->height, la);
+        memcpy(out + pos, la, la_len);
+        pos += la_len;
+        free(la);
+    }
     {
         int room = ((pos / TDC_BLOCK) + 1) * TDC_BLOCK - pos;
         int n = tpl->trailer_len < room ? tpl->trailer_len : room;
