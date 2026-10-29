@@ -18,7 +18,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include "tdc_format.h"
-#include "machine_cfg.h"
+#if defined(__has_include)
+#  if __has_include("machine_cfg.h")
+#    include "machine_cfg.h"
+#    define HAVE_MACHINE_CFG 1
+#  endif
+#endif
 
 /* ---------------- controls ---------------- */
 #define IDC_BTN_IMG        103
@@ -101,16 +106,22 @@ static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v
  * Optional: a real same-article LAENGE can still be loaded via «قالب از فایل». */
 static void init_template_state(void)
 {
-    static const uint8_t p88[] = MCFG_PARAM88;
-    static const uint8_t tr[] = MCFG_TRAILER;
     memset(&g_tpl, 0, sizeof g_tpl);
     strcpy(g_tpl.name, "DESIGN");
     strcpy(g_tpl.date, "01.01.00");
-    memcpy(g_tpl.param, p88, 88);
-    memcpy(g_tpl.trailer, tr, sizeof tr);
-    g_tpl.trailer_len = (int)sizeof tr;
-    g_tpl.laenge_len = 0;             /* LAENGE from pure generator */
-    g_hasTpl = 1;                     /* config always present */
+#ifdef HAVE_MACHINE_CFG
+    {   /* operator build: machine constants embedded */
+        static const uint8_t p88[] = MCFG_PARAM88;
+        static const uint8_t tr[] = MCFG_TRAILER;
+        memcpy(g_tpl.param, p88, 88);
+        memcpy(g_tpl.trailer, tr, sizeof tr);
+        g_tpl.trailer_len = (int)sizeof tr;
+        g_tpl.laenge_len = 0;         /* LAENGE from pure generator */
+        g_hasTpl = 1;
+    }
+#else
+    g_hasTpl = 0;   /* public build: «قالب از فایل» required once */
+#endif
 }
 
 /* ---------------- image → design ---------------- */
